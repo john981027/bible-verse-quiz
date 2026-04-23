@@ -220,12 +220,16 @@ const bibleData = [
     reference: "로마서 13장 6절",
     verse: "너희가 조세를 바치는 것도 이로 말미암음이라 그들이 하나님의 일꾼이 되어 바로 이 일에 항상 힘쓰느니라",
   },
-];
+].map(enrichQuestion);
+
+const STORAGE_KEY = "bible-verse-quiz-records-v2";
+const MAX_STORED_RECORDS = 40;
 
 const difficultyConfig = {
-  beginner: { label: "초급", optionCount: 3 },
-  intermediate: { label: "중급", optionCount: 4 },
-  advanced: { label: "고급", optionCount: 5 },
+  beginner: { label: "초급", subtitle: "3지선다", mode: "choice", optionCount: 3 },
+  intermediate: { label: "중급", subtitle: "4지선다", mode: "choice", optionCount: 4 },
+  advanced: { label: "고급", subtitle: "5지선다", mode: "choice", optionCount: 5 },
+  memory: { label: "암기형", subtitle: "숫자 직접 입력", mode: "input", optionCount: 0 },
 };
 
 const screens = {
@@ -245,6 +249,17 @@ const verseText = document.querySelector("#verse-text");
 const optionsContainer = document.querySelector("#options-container");
 const hintBox = document.querySelector("#hint-box");
 const feedback = document.querySelector("#feedback");
+const questionText = document.querySelector("#question-text");
+const guideText = document.querySelector("#guide-text");
+
+const memoryAnswerForm = document.querySelector("#memory-answer-form");
+const memoryBookLabel = document.querySelector("#memory-book-label");
+const chapterInput = document.querySelector("#chapter-input");
+const verseInput = document.querySelector("#verse-input");
+const submitAnswerButton = document.querySelector("#submit-answer-button");
+
+const historyEmpty = document.querySelector("#history-empty");
+const historyList = document.querySelector("#history-list");
 
 const resultTitle = document.querySelector("#result-title");
 const resultMessage = document.querySelector("#result-message");
@@ -255,6 +270,8 @@ const resultHints = document.querySelector("#result-hints");
 const resultDifficulty = document.querySelector("#result-difficulty");
 const resultTotal = document.querySelector("#result-total");
 const resultHintText = document.querySelector("#result-hint-text");
+const reviewEmpty = document.querySelector("#review-empty");
+const reviewList = document.querySelector("#review-list");
 
 const state = {
   playerName: "익명",
@@ -266,7 +283,53 @@ const state = {
   usedHintIds: new Set(),
   isLocked: false,
   timerId: null,
+  answerLog: [],
 };
+
+function parseReference(reference) {
+  const match = reference.match(/^(.*?)\s+(\d+)(장|편)\s+([0-9~]+)절$/);
+
+  if (!match) {
+    throw new Error(`지원하지 않는 참고 구절 형식입니다: ${reference}`);
+  }
+
+  return {
+    bookName: match[1],
+    chapterNumber: String(Number(match[2])),
+    chapterLabel: match[3],
+    verseNumber: normalizeVerseValue(match[4]),
+  };
+}
+
+function enrichQuestion(item) {
+  return {
+    ...item,
+    ...parseReference(item.reference),
+  };
+}
+
+function normalizeVerseValue(value) {
+  const sanitized = value
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/[-–—]/g, "~")
+    .replace(/[^0-9~]/g, "");
+
+  if (!sanitized) {
+    return "";
+  }
+
+  return sanitized
+    .split("~")
+    .filter(Boolean)
+    .map((part) => String(Number(part)))
+    .join("~");
+}
+
+function normalizeChapterValue(value) {
+  const digits = value.replace(/\D/g, "");
+  return digits ? String(Number(digits)) : "";
+}
 
 function shuffle(array) {
   const copied = [...array];
@@ -290,6 +353,15 @@ function getSelectedValue(groupName) {
   return selected ? selected.dataset.value : "";
 }
 
+function getDifficultyMeta(difficultyKey = state.difficulty) {
+  return difficultyConfig[difficultyKey];
+}
+
+function getDifficultyBadgeText(difficultyKey = state.difficulty) {
+  const difficulty = getDifficultyMeta(difficultyKey);
+  return `${difficulty.label} · ${difficulty.subtitle}`;
+}
+
 function formatHint(question) {
   if (question.lessonLabel.endsWith("과")) {
     return `[힌트] ${question.lessonLabel} ${question.title}`;
@@ -299,7 +371,7 @@ function formatHint(question) {
 }
 
 function buildOptions(question) {
-  const optionCount = difficultyConfig[state.difficulty].optionCount;
+  const optionCount = getDifficultyMeta().optionCount;
   const distractorPool = shuffle(
     [...new Set(bibleData.filter((item) => item.id !== question.id).map((item) => item.reference))]
   ).slice(0, optionCount - 1);
@@ -316,24 +388,52 @@ function updateHintState(question) {
   hintCountBadge.textContent = `힌트 ${state.usedHintIds.size}개`;
   hintButton.textContent = hasHint ? "힌트 다시 보기" : "힌트 보기 (-1점)";
   hintBox.hidden = !hasHint;
+  hintBox.textContent = hasHint ? formatHint(question) : "";
+}
 
-  if (hasHint) {
-    hintBox.textContent = formatHint(question);
-  } else {
-    hintBox.textContent = "";
-  }
+function clearFeedback() {
+  feedback.textContent = "";
+  feedback.className = "feedback";
+}
+
+function clearMemoryInputs() {
+  chapterInput.value = "";
+  verseInput.value = "";
+  chapterInput.disabled = false;
+  verseInput.disabled = false;
+  submitAnswerButton.disabled = false;
+  chapterInput.classList.remove("is-correct", "is-wrong");
+  verseInput.classList.remove("is-correct", "is-wrong");
 }
 
 function renderQuestion() {
   const question = state.questions[state.currentIndex];
-  const difficulty = difficultyConfig[state.difficulty];
-  const options = buildOptions(question);
+  const difficulty = getDifficultyMeta();
 
   progressText.textContent = `${state.currentIndex + 1} / ${state.totalQuestions}`;
-  difficultyBadge.textContent = `${difficulty.label} · ${difficulty.optionCount}지선다`;
+  difficultyBadge.textContent = getDifficultyBadgeText();
   verseText.textContent = `“${question.verse}”`;
-  feedback.textContent = "";
-  feedback.className = "feedback";
+  clearFeedback();
+  state.isLocked = false;
+  hintButton.disabled = false;
+
+  if (difficulty.mode === "input") {
+    renderInputQuestion(question);
+  } else {
+    renderChoiceQuestion(question);
+  }
+
+  updateHintState(question);
+}
+
+function renderChoiceQuestion(question) {
+  const options = buildOptions(question);
+
+  questionText.textContent = "다음 말씀의 장과 절은 무엇일까요?";
+  guideText.textContent = "정답을 선택하면 다음 문제로 자동 진행됩니다.";
+
+  memoryAnswerForm.hidden = true;
+  optionsContainer.hidden = false;
   optionsContainer.innerHTML = "";
 
   options.forEach((option, index) => {
@@ -347,13 +447,21 @@ function renderQuestion() {
       <span class="option-text">${option.reference}</span>
     `;
 
-    button.addEventListener("click", () => handleOptionClick(button, option.isCorrect));
+    button.addEventListener("click", () => handleChoiceAnswer(button, option.isCorrect));
     optionsContainer.appendChild(button);
   });
+}
 
-  state.isLocked = false;
-  hintButton.disabled = false;
-  updateHintState(question);
+function renderInputQuestion(question) {
+  questionText.textContent = "책 이름을 보고 장/편과 절 숫자를 직접 입력해 보세요.";
+  guideText.textContent = "정답 확인을 누르면 자동으로 다음 문제로 넘어갑니다.";
+  memoryBookLabel.textContent = `책 이름: ${question.bookName}`;
+
+  optionsContainer.hidden = true;
+  optionsContainer.innerHTML = "";
+  memoryAnswerForm.hidden = false;
+  clearMemoryInputs();
+  chapterInput.focus();
 }
 
 function getScore() {
@@ -363,24 +471,150 @@ function getScore() {
 
 function getResultMessage(score) {
   if (score >= 95) {
-    return "말씀을 또렷하게 기억하고 있어요. 정말 훌륭한 집중력이에요.";
+    return "말씀을 또렷하게 기억하고 있어요. 시험 대비 흐름이 아주 좋습니다.";
   }
 
   if (score >= 80) {
-    return "말씀을 잘 기억하고 있어요. 조금만 더 도전하면 더 높은 점수를 받을 수 있어요.";
+    return "좋은 기억력을 보여 주고 있어요. 틀린 문제만 다시 보면 훨씬 단단해질 거예요.";
   }
 
   if (score >= 60) {
-    return "좋은 흐름으로 잘 풀었어요. 다시 도전하면 더 멋진 결과가 나올 거예요.";
+    return "기본 흐름은 잘 잡혀 있어요. 아래 오답 복습으로 암기를 더 선명하게 만들어 보세요.";
   }
 
-  return "한 문제씩 다시 익히면 더 분명하게 기억할 수 있어요. 다시 한번 도전해 보세요.";
+  return "틀린 문제를 다시 읽고 반복하면 빠르게 기억이 붙습니다. 오답 복습부터 다시 시작해 보세요.";
+}
+
+function buildRecord() {
+  return {
+    playerName: state.playerName,
+    totalQuestions: state.totalQuestions,
+    correctCount: state.correctCount,
+    score: getScore(),
+    hintCount: state.usedHintIds.size,
+    difficulty: state.difficulty,
+    difficultyLabel: getDifficultyBadgeText(),
+    wrongCount: state.totalQuestions - state.correctCount,
+    playedAt: new Date().toISOString(),
+  };
+}
+
+function loadStoredRecords() {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function saveStoredRecords(records) {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+  } catch (error) {
+    // Ignore storage errors and keep the quiz usable.
+  }
+}
+
+function persistCurrentRecord() {
+  const records = loadStoredRecords();
+  const nextRecords = [buildRecord(), ...records].slice(0, MAX_STORED_RECORDS);
+  saveStoredRecords(nextRecords);
+}
+
+function formatPlayedAt(value) {
+  const date = new Date(value);
+
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function renderHistoryPreview(nameValue) {
+  const targetName = nameValue.trim();
+  const records = loadStoredRecords();
+
+  historyList.innerHTML = "";
+
+  if (!targetName) {
+    historyEmpty.hidden = false;
+    historyEmpty.textContent = "이름을 먼저 입력하면 이전 기록을 보여 드립니다.";
+    return;
+  }
+
+  const matchingRecords = records.filter((record) => record.playerName === targetName).slice(0, 6);
+
+  if (matchingRecords.length === 0) {
+    historyEmpty.hidden = false;
+    historyEmpty.textContent = `${targetName} 이름으로 저장된 기록이 아직 없어요. 첫 도전을 시작해 보세요.`;
+    return;
+  }
+
+  historyEmpty.hidden = true;
+
+  matchingRecords.forEach((record) => {
+    const card = document.createElement("article");
+    card.className = "history-card";
+    card.innerHTML = `
+      <div class="history-card-top">
+        <strong>${record.score}점</strong>
+        <span>${formatPlayedAt(record.playedAt)}</span>
+      </div>
+      <p class="history-card-summary">${record.correctCount} / ${record.totalQuestions} 정답</p>
+      <div class="history-card-meta">
+        <span>${record.difficultyLabel}</span>
+        <span>힌트 ${record.hintCount}개</span>
+      </div>
+    `;
+    historyList.appendChild(card);
+  });
+}
+
+function renderReviewList() {
+  const wrongAnswers = state.answerLog.filter((entry) => !entry.isCorrect);
+
+  reviewList.innerHTML = "";
+  reviewEmpty.hidden = wrongAnswers.length !== 0;
+
+  wrongAnswers.forEach((entry, index) => {
+    const card = document.createElement("article");
+    card.className = "review-card";
+    card.innerHTML = `
+      <div class="review-card-top">
+        <span class="review-order">복습 ${index + 1}</span>
+        <div class="review-tags">
+          <span class="review-tag">${entry.lessonLabel}</span>
+          <span class="review-tag">${entry.hintUsed ? "힌트 사용" : "힌트 없음"}</span>
+        </div>
+      </div>
+      <h4>${entry.title}</h4>
+      <p class="review-verse">“${entry.verse}”</p>
+      <p class="review-summary-copy">${entry.summary}</p>
+      <div class="review-answer-grid">
+        <article>
+          <span>정답</span>
+          <strong>${entry.correctReference}</strong>
+        </article>
+        <article>
+          <span>내 답</span>
+          <strong>${entry.userAnswer}</strong>
+        </article>
+      </div>
+    `;
+    reviewList.appendChild(card);
+  });
 }
 
 function renderResult() {
   const hintCount = state.usedHintIds.size;
-  const difficulty = difficultyConfig[state.difficulty];
+  const difficulty = getDifficultyMeta();
   const score = getScore();
+
+  persistCurrentRecord();
 
   resultTitle.textContent = `${state.playerName}님의 성경 퀴즈 결과`;
   resultMessage.textContent = getResultMessage(score);
@@ -392,6 +626,8 @@ function renderResult() {
   resultTotal.textContent = `${state.totalQuestions}문제`;
   resultHintText.textContent = `힌트 ${hintCount}개 사용`;
 
+  renderReviewList();
+  renderHistoryPreview(state.playerName);
   showScreen("result");
 }
 
@@ -405,14 +641,21 @@ function moveNext() {
   renderQuestion();
 }
 
-function handleOptionClick(selectedButton, isCorrect) {
-  if (state.isLocked) {
-    return;
-  }
+function recordAnswer(question, isCorrect, userAnswer) {
+  state.answerLog.push({
+    id: question.id,
+    isCorrect,
+    userAnswer,
+    correctReference: question.reference,
+    verse: question.verse,
+    lessonLabel: question.lessonLabel,
+    title: question.title,
+    summary: question.summary,
+    hintUsed: state.usedHintIds.has(question.id),
+  });
+}
 
-  state.isLocked = true;
-  hintButton.disabled = true;
-
+function lockChoiceButtons() {
   const optionButtons = [...document.querySelectorAll(".option-button")];
   optionButtons.forEach((button) => {
     button.disabled = true;
@@ -422,16 +665,88 @@ function handleOptionClick(selectedButton, isCorrect) {
       button.classList.add("is-correct");
     }
   });
+}
+
+function handleChoiceAnswer(selectedButton, isCorrect) {
+  if (state.isLocked) {
+    return;
+  }
+
+  const question = state.questions[state.currentIndex];
+
+  state.isLocked = true;
+  hintButton.disabled = true;
+  lockChoiceButtons();
+
+  recordAnswer(question, isCorrect, selectedButton.dataset.reference);
 
   if (isCorrect) {
     state.correctCount += 1;
     selectedButton.classList.add("is-correct");
-    feedback.textContent = "정답입니다!";
-    feedback.classList.add("is-success");
+    feedback.textContent = `정답입니다! ${question.reference}`;
+    feedback.className = "feedback is-success";
   } else {
     selectedButton.classList.add("is-wrong");
-    feedback.textContent = "아쉬워요. 다음 문제로 넘어갑니다.";
-    feedback.classList.add("is-error");
+    feedback.textContent = `아쉬워요. 정답은 ${question.reference}입니다.`;
+    feedback.className = "feedback is-error";
+  }
+
+  window.clearTimeout(state.timerId);
+  state.timerId = window.setTimeout(moveNext, 1000);
+}
+
+function formatUserInputAnswer(question, chapterValue, verseValue) {
+  const pieces = [];
+
+  if (chapterValue) {
+    pieces.push(`${chapterValue}${question.chapterLabel}`);
+  }
+
+  if (verseValue) {
+    pieces.push(`${verseValue}절`);
+  }
+
+  return pieces.length === 0 ? "입력 안 함" : `${question.bookName} ${pieces.join(" ")}`;
+}
+
+function handleMemoryAnswerSubmit(event) {
+  event.preventDefault();
+
+  if (state.isLocked) {
+    return;
+  }
+
+  const question = state.questions[state.currentIndex];
+  const chapterValue = normalizeChapterValue(chapterInput.value);
+  const verseValue = normalizeVerseValue(verseInput.value);
+
+  if (!chapterValue || !verseValue) {
+    feedback.textContent = "장/편과 절을 모두 입력해 주세요.";
+    feedback.className = "feedback is-error";
+    return;
+  }
+
+  const isCorrect = chapterValue === question.chapterNumber && verseValue === question.verseNumber;
+
+  state.isLocked = true;
+  hintButton.disabled = true;
+  chapterInput.disabled = true;
+  verseInput.disabled = true;
+  submitAnswerButton.disabled = true;
+
+  recordAnswer(question, isCorrect, formatUserInputAnswer(question, chapterValue, verseValue));
+
+  if (isCorrect) {
+    state.correctCount += 1;
+    chapterInput.classList.add("is-correct");
+    verseInput.classList.add("is-correct");
+    feedback.textContent = `정답입니다! ${question.reference}`;
+    feedback.className = "feedback is-success";
+  } else {
+    chapterInput.classList.add("is-wrong");
+    verseInput.classList.add("is-wrong");
+    feedback.textContent = `아쉬워요. 정답은 ${question.reference}입니다.`;
+    feedback.className = "feedback is-error";
   }
 
   window.clearTimeout(state.timerId);
@@ -450,6 +765,7 @@ function revealHint() {
 
 function startGame() {
   window.clearTimeout(state.timerId);
+
   state.playerName = playerNameInput.value.trim() || "익명";
   state.totalQuestions = Number(getSelectedValue("count")) || 10;
   state.difficulty = getSelectedValue("difficulty") || "beginner";
@@ -459,6 +775,7 @@ function startGame() {
   state.usedHintIds = new Set();
   state.isLocked = false;
   state.timerId = null;
+  state.answerLog = [];
 
   renderQuestion();
   showScreen("quiz");
@@ -467,6 +784,7 @@ function startGame() {
 function resetGame() {
   window.clearTimeout(state.timerId);
   state.isLocked = false;
+  renderHistoryPreview(playerNameInput.value.trim());
   showScreen("start");
 }
 
@@ -482,6 +800,23 @@ document.querySelectorAll("[data-group]").forEach((button) => {
   });
 });
 
+chapterInput.addEventListener("input", () => {
+  chapterInput.value = chapterInput.value.replace(/\D/g, "").slice(0, 3);
+  chapterInput.classList.remove("is-correct", "is-wrong");
+});
+
+verseInput.addEventListener("input", () => {
+  verseInput.value = verseInput.value.replace(/[^0-9~\-]/g, "").slice(0, 7);
+  verseInput.classList.remove("is-correct", "is-wrong");
+});
+
+playerNameInput.addEventListener("input", () => {
+  renderHistoryPreview(playerNameInput.value);
+});
+
+memoryAnswerForm.addEventListener("submit", handleMemoryAnswerSubmit);
 startButton.addEventListener("click", startGame);
 restartButton.addEventListener("click", resetGame);
 hintButton.addEventListener("click", revealHint);
+
+renderHistoryPreview("");
